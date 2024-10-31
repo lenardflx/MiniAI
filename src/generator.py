@@ -45,6 +45,9 @@ class TextGenerator:
         start_tokens = [self.vocab.get(token, self.vocab["<unk>"]) for token in start_text.split()]
         generated_tokens = list(start_tokens)
 
+        if self.realtime_output:
+            print(start_text, end=" ", flush=True)
+
         for _ in range(max_len):
             input_seq = jnp.array(generated_tokens).reshape(1, -1)
             mask = (input_seq != self.vocab["<pad>"]).astype(jnp.float32).reshape(1, 1, 1, -1)

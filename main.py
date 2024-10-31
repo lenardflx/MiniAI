@@ -32,8 +32,6 @@ def main(pdf_path=config.pdf_path, start_text="", num_epochs=config.num_epochs,
         data=data,
         vocab_size=vocab_size,
         learning_rate=config.learning_rate,
-        label_smoothing=config.label_smoothing,
-        clip_value=config.clip_value
     )
 
     print("Starting training...")

@@ -6,36 +6,16 @@ import jax.numpy as jnp
 import optax
 
 class LanguageModelTrainer:
-    def __init__(self, transformer_model, data, vocab_size, learning_rate=0.001, label_smoothing=0.05, clip_value=1.0):
+    def __init__(self, transformer_model, data, vocab_size, learning_rate=0.001):
         self.transformer_model = transformer_model
         self.data = data
         self.vocab_size = vocab_size
         self.learning_rate = learning_rate
         self.grammar_tasks = GrammarTasks(mask_token_id=1, mask_prob=0.15)
-        self.label_smoothing = label_smoothing  # Load from config
-        self.clip_value = clip_value  # Load from config
 
         # Initialize optimizer
         self.optimizer = optax.adam(learning_rate)
         self.opt_state = self.optimizer.init(self.transformer_model.params)
-
-    def smooth_labels(self, labels):
-        """Apply label smoothing to one-hot labels."""
-        # One-hot encode labels
-        one_hot_labels = jax.nn.one_hot(labels, num_classes=self.vocab_size)
-        # Apply smoothing
-        return one_hot_labels * (1 - self.label_smoothing) + (self.label_smoothing / self.vocab_size)
-
-    def loss_fn(self, params, x, y, mask):
-        """Compute the loss with label smoothing."""
-        logits = self.transformer_model.forward(x, mask)  # Model predictions
-        smoothed_labels = self.smooth_labels(y)  # Apply label smoothing
-
-        # Calculate the cross-entropy loss
-        loss = -jnp.sum(smoothed_labels * jax.nn.log_softmax(logits), axis=-1)
-        # Apply mask to ignore padding tokens
-        masked_loss = loss * mask
-        return jnp.mean(masked_loss)  # Average over non-masked elements
 
     def create_mask(self, x):
         """Create a mask for padding tokens in the input sequence."""
@@ -95,21 +75,15 @@ class LanguageModelTrainer:
         return loss
 
     def train_step(self, params, opt_state, x, y, mask, task_type='Standard'):
-        """Perform a single training step with gradient clipping and optional grammar tasks."""
-        # Choose loss function based on task type
+        """Perform a single training step, with optional grammar tasks."""
+        # Choose task type randomly for diversity
         if task_type == 'Standard':
             loss_fn = self.loss_fn  # Standard language modeling loss
         else:
             loss_fn = lambda p, x, y, m: self.grammar_aware_loss_fn(p, x, y, m, task_type)
 
-        # Compute gradients for the selected loss function
         grads = jax.grad(loss_fn)(params, x, y, mask)
-
-        # Apply gradient clipping
-        clipped_grads = jax.tree_map(lambda g: jnp.clip(g, -self.clip_value, self.clip_value), grads)
-
-        # Update parameters using the clipped gradients
-        updates, opt_state = self.optimizer.update(clipped_grads, opt_state)
+        updates, opt_state = self.optimizer.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         return params, opt_state
 
