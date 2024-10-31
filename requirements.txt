@@ -1,6 +1,2 @@
-dm-haiku
-jax
-jaxlib
-optax
-flax
-pymupdf
+jax~=0.4.35
+optax~=0.2.3

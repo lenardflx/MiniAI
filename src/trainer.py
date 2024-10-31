@@ -1,11 +1,23 @@
 import random
 import time
-from src.grammar_tasks import GrammarTasks
 import jax
 import jax.numpy as jnp
 import optax
+from src.display import Display
+from src.grammar_tasks import GrammarTasks
+
+
+class TrainingError(Exception):
+    """Custom exception class for handling training errors."""
+    pass
+
 
 class LanguageModelTrainer:
+    """
+    Language model trainer that manages the training loop, optimizer updates,
+    and optional grammar tasks for training the language model.
+    """
+
     def __init__(self, transformer_model, data, vocab_size, learning_rate=0.001):
         self.transformer_model = transformer_model
         self.data = data
@@ -18,45 +30,27 @@ class LanguageModelTrainer:
         self.opt_state = self.optimizer.init(self.transformer_model.params)
 
     def create_mask(self, x):
-        """Create a mask for padding tokens in the input sequence."""
-        # Check if x has a batch dimension and is a 2D array
-        if x.ndim == 1:
-            x = x.reshape(1, -1)  # Ensure x is (batch_size, seq_len)
-
-        # Create a mask where 1 represents valid tokens and 0 represents padding tokens
-        mask = (x != 1).astype(jnp.float32)  # Assuming padding token ID is 1
-
-        # Reshape mask to (batch_size, 1, 1, seq_len) for broadcasting
-        mask = mask[:, None, None, :]  # Adds the necessary dimensions for broadcasting
-
-        return mask
+        """
+        Create a mask for padding tokens in the input sequence to prevent
+        unnecessary gradient updates.
+        """
+        try:
+            if x.ndim == 1:
+                x = x.reshape(1, -1)
+            return (x != 1).astype(jnp.float32)[:, None, None, :]
+        except Exception as e:
+            raise TrainingError("Error in creating mask.") from e
 
     def loss_fn(self, params, x, y, mask):
-        """Compute the loss for given input and target with masking, preventing NaN."""
-        logits = self.transformer_model.forward(x, mask)
-
-        # Stabilize logits by clipping to avoid NaN values
-        logits = jnp.clip(logits, a_min=-1e9, a_max=1e9)
-
-        # Calculate loss with added epsilon for stability
-        one_hot_labels = jax.nn.one_hot(y, num_classes=self.vocab_size)
-        epsilon = 1e-8  # Small value to avoid log(0)
-        loss = -jnp.sum(one_hot_labels * jax.nn.log_softmax(logits + epsilon)) / mask.sum()
-        return loss
-
-    def format_loss(self, loss):
-        """Format the loss with suffixes for thousands (k), millions (M), etc."""
-        if loss >= 1e6:
-            return f"{loss / 1e6:.2f}M"
-        elif loss >= 1e3:
-            return f"{loss / 1e3:.2f}k"
-        else:
-            return f"{loss:.2f}"
-
-    def format_time(self, seconds):
-        """Convert time in seconds to mm:ss format."""
-        minutes, seconds = divmod(int(seconds), 60)
-        return f"{minutes:02}:{seconds:02}"
+        """Compute the masked cross-entropy loss between predicted and target tokens."""
+        try:
+            logits = self.transformer_model.forward(x, mask)
+            logits = jnp.clip(logits, a_min=-1e9, a_max=1e9)
+            one_hot_labels = jax.nn.one_hot(y, num_classes=self.vocab_size)
+            epsilon = 1e-8
+            return -jnp.sum(one_hot_labels * jax.nn.log_softmax(logits + epsilon)) / mask.sum()
+        except Exception as e:
+            raise e #TrainingError("Error in computing loss.") from e
 
     def grammar_aware_loss_fn(self, params, x, y, mask, task_type):
         """Compute the loss for the specified grammar-aware task."""
@@ -88,54 +82,47 @@ class LanguageModelTrainer:
         return params, opt_state
 
     def train(self, num_epochs=500):
-        total_batches = len(self.data) * num_epochs
-        current_batch = 0
-        start_time = time.time()
-        bar_length = 20  # Length of the progress bar
+        """
+        Conducts the training loop with periodic display of progress and
+        estimated time remaining.
+        """
+        try:
+            start_time = time.time()
+            total_batches = len(self.data) * num_epochs
+            current_batch = 0
 
-        for epoch in range(num_epochs):
-            total_loss = 0
-            for i, sentence in enumerate(self.data):
-                x = jnp.array(sentence[:-1])  # Input tokens
-                y = jnp.array(sentence[1:])  # Target tokens
-                mask = self.create_mask(x)
+            for epoch in range(num_epochs):
+                for i, sentence in enumerate(self.data):
+                    x = jnp.array(sentence[:-1])
+                    y = jnp.array(sentence[1:])
+                    mask = self.create_mask(x)
+                    task_type = random.choice(['Standard', 'MLM', 'Reorder'])
 
-                # Select task type randomly
-                task_type = random.choice(['Standard', 'MLM', 'Reorder'])
+                    if task_type == 'MLM':
+                        x = self.grammar_tasks.masked_language_modeling(sentence[:-1])
+                    elif task_type == 'Reorder':
+                        x, y = self.grammar_tasks.sequence_reordering(sentence[:-1])
 
-                # Prepare task data
-                if task_type == 'MLM':
-                    x = self.grammar_tasks.masked_language_modeling(sentence[:-1])
-                elif task_type == 'Reorder':
-                    x, y = self.grammar_tasks.sequence_reordering(sentence[:-1])
-
-                # Perform a training step
-                self.transformer_model.params, self.opt_state = self.train_step(
-                    self.transformer_model.params, self.opt_state, x, y, mask, task_type
-                )
-
-                # Calculate loss for reporting
-                loss = self.loss_fn(self.transformer_model.params, x, y, mask)
-                total_loss += loss
-
-                # Update batch count and display progress
-                current_batch += 1
-                percent_complete = (current_batch / total_batches) * 100
-                num_hashes = int((percent_complete / 100) * bar_length)
-                progress_bar = f"[{'#' * num_hashes}{' ' * (bar_length - num_hashes)}]"
-                elapsed_time = time.time() - start_time
-                avg_batch_time = elapsed_time / current_batch
-                estimated_time_remaining = self.format_time(avg_batch_time * (total_batches - current_batch))
-                avg_loss = total_loss / current_batch
-
-                # Display progress every 10 batches
-                if current_batch % 10 == 0:
-                    print(
-                        f"\rEpoch {epoch + 1}/{num_epochs} {progress_bar} "
-                        f"{percent_complete:.2f}% complete - "
-                        f"Avg Loss: {self.format_loss(avg_loss)} - "
-                        f"Time remaining: {estimated_time_remaining}",
-                        end=""
+                    self.transformer_model.params, self.opt_state = self.train_step(
+                        self.transformer_model.params, self.opt_state, x, y, mask, task_type
                     )
 
-        print(f"\rEpoch {num_epochs}/{num_epochs} [###################] {100:.2f}% completed training")
+                    # Progress calculation and output
+                    current_batch += 1
+                    progress = current_batch / total_batches
+                    elapsed_time = time.time() - start_time
+                    estimated_time_remaining = self.format_time(elapsed_time / progress - elapsed_time)
+                    avg_loss = self.loss_fn(self.transformer_model.params, x, y, mask)
+
+                    if current_batch % 10 == 0:
+                        Display.training_progress(epoch, num_epochs, progress, avg_loss, estimated_time_remaining)
+
+            Display.training_complete_message(self.format_time(time.time() - start_time))
+        except TrainingError as e:
+            print(f"Training failed: {e}")
+
+    @staticmethod
+    def format_time(seconds):
+        """Format seconds into mm:ss format for time estimation."""
+        minutes, seconds = divmod(int(seconds), 60)
+        return f"{minutes:02}:{seconds:02}"
